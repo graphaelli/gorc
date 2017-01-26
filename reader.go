@@ -21,7 +21,6 @@ const (
 
 type reader interface {
 	io.Closer
-	io.ReadSeeker
 	io.ReaderAt
 	Name() string
 }
