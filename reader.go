@@ -133,39 +133,10 @@ func (f *File) loadFooter(tail *[]byte) error {
 	}
 
 	if *(f.PostScript.Compression) != CompressionKind_NONE {
-		buf := make([]byte, 3)
-		// TODO: handle short read
-		if _, err := footerReader.Read(buf); err != nil {
+		var err error
+		footerReader, err = f.compressedReader(footerReader, footerLength)
+		if err != nil {
 			return err
-		}
-		buf = append(buf, 0)
-		header := binary.LittleEndian.Uint32(buf)
-
-		isOriginal := header & 1
-		compressedLength := header >> 1 // (header - isOriginal) / 2
-		if int64(compressedLength) != footerLength-3 {
-			log.Printf("compressed length %d less than footer %d", compressedLength, footerLength-3)
-			footerReader = &io.LimitedReader{R: footerReader, N: int64(compressedLength)}
-		}
-
-		if isOriginal == 0 {
-			switch *(f.PostScript.Compression) {
-			case CompressionKind_ZLIB:
-				footerReader = flate.NewReader(footerReader)
-			case CompressionKind_SNAPPY:
-				snap, err := ioutil.ReadAll(footerReader)
-				if err != nil {
-					return fmt.Errorf("while reading snappy footer: %s", err)
-				}
-
-				dst, err := snappy.Decode(nil, snap)
-				if err != nil {
-					return fmt.Errorf("while decoding snappy footer: %s", err)
-				}
-				footerReader = bytes.NewReader(dst)
-			default:
-				return fmt.Errorf("unsupported compression: %s", f.PostScript.Compression.String())
-			}
 		}
 	}
 
@@ -179,4 +150,69 @@ func (f *File) loadFooter(tail *[]byte) error {
 	}
 
 	return nil
+}
+
+func (f *File) GetStripeFooter(i *StripeInformation) (*StripeFooter, error) {
+	start := int64(i.GetOffset() + i.GetIndexLength() + i.GetDataLength())
+	length := int64(i.GetFooterLength())
+	var r io.Reader = io.NewSectionReader(f.r, start, length)
+
+	if *(f.PostScript.Compression) != CompressionKind_NONE {
+		var err error
+		r, err = f.compressedReader(r, length)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	buf, err := ioutil.ReadAll(r)
+	if err != nil {
+		return nil, fmt.Errorf("while consuming stripe footer: %s", err)
+	}
+
+	var footer StripeFooter
+	if err := proto.Unmarshal(buf, &footer); err != nil {
+		return nil, fmt.Errorf("while unmarshaling stripe footer: %s", err)
+	}
+
+	return &footer, nil
+}
+
+func (f *File) compressedReader(r io.Reader, l int64) (io.Reader, error) {
+	buf := make([]byte, 3)
+	// TODO: handle short read
+	if _, err := r.Read(buf); err != nil {
+		return nil, err
+	}
+	buf = append(buf, 0)
+	header := binary.LittleEndian.Uint32(buf)
+
+	isOriginal := header & 1
+	compressedLength := header >> 1 // (header - isOriginal) / 2
+	if int64(compressedLength) != l-3 {
+		log.Printf("compressed length %d less than expected %d", compressedLength, l-3)
+		r = &io.LimitedReader{R: r, N: int64(compressedLength)}
+	}
+
+	if isOriginal == 0 {
+		switch *(f.PostScript.Compression) {
+		case CompressionKind_ZLIB:
+			r = flate.NewReader(r)
+		case CompressionKind_SNAPPY:
+			snap, err := ioutil.ReadAll(r)
+			if err != nil {
+				return nil, fmt.Errorf("while reading snappy bits: %s", err)
+			}
+
+			dst, err := snappy.Decode(nil, snap)
+			if err != nil {
+				return nil, fmt.Errorf("while decoding snappy bits: %s", err)
+			}
+			r = bytes.NewReader(dst)
+		default:
+			return nil, fmt.Errorf("unsupported compression: %s", f.PostScript.Compression.String())
+		}
+	}
+
+	return r, nil
 }

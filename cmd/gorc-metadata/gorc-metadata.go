@@ -12,6 +12,10 @@ import (
 	"github.com/graphaelli/gorc"
 )
 
+var (
+	verbose = flag.Bool("verbose", false, "include additional metadata")
+)
+
 func init() {
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: %s [options] <filename> [<filename> ...]\n", os.Args[0])
@@ -19,21 +23,56 @@ func init() {
 	}
 }
 
-func stripes(infos []*orc.StripeInformation) []map[string]interface{} {
-	var s []map[string]interface{}
+func stripes(infos []*orc.StripeInformation, f *orc.File, verbose bool) []map[string]interface{} {
+	var j []map[string]interface{}
 
 	for i, info := range infos {
-		s = append(s, map[string]interface{}{
+		offset := info.GetOffset()
+		si := map[string]interface{}{
 			"data":   info.GetDataLength(),
 			"footer": info.GetFooterLength(),
 			"index":  info.GetIndexLength(),
 			"length": info.GetIndexLength() + info.GetDataLength() + info.GetFooterLength(),
-			"offset": info.GetOffset(),
+			"offset": offset,
 			"rows":   info.GetNumberOfRows(),
 			"stripe": i,
-		})
+		}
+
+		if verbose {
+			if footer, err := f.GetStripeFooter(info); err != nil {
+				si["encodings"] = err
+			} else {
+				encodings := []map[string]interface{}{}
+				for c, col := range footer.GetColumns() {
+					encodings = append(encodings, map[string]interface{}{
+						"column":   c,
+						"encoding": col.GetKind().String(),
+						"count":    col.GetDictionarySize(),
+					})
+				}
+				si["encodings"] = encodings
+
+				streams := []map[string]interface{}{}
+				for c, col := range footer.GetStreams() {
+					length := col.GetLength()
+					streams = append(streams, map[string]interface{}{
+						"column": col.GetColumn(),
+						"id":     c,
+						"kind":   col.GetKind().String(),
+						"length": length,
+						"offset": offset,
+					})
+					offset += length
+				}
+				si["streams"] = streams
+
+				si["timezone"] = footer.GetWriterTimezone()
+			}
+		}
+
+		j = append(j, si)
 	}
-	return s
+	return j
 }
 
 func main() {
@@ -67,7 +106,7 @@ func main() {
 			"rows":              o.Footer.GetNumberOfRows(),
 			"stripe count":      len(o.Footer.GetStripes()),
 			"stripe stats":      o.PostScript.GetMetadataLength(),
-			"stripes":           stripes(o.Footer.GetStripes()),
+			"stripes":           stripes(o.Footer.GetStripes(), o, *verbose),
 			"type":              fmt.Sprintf("%q", o.Footer.Types), // not identical
 			"user metadata":     o.Footer.GetMetadata(),            // not identical
 			"writer version":    o.WriterVersion(),
