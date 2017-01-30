@@ -28,8 +28,10 @@ type reader interface {
 type File struct {
 	PostScript
 	Footer
+	metadata Metadata
 
 	length           int64
+	metadataLoaded   bool
 	postscriptLength int64
 	r                reader
 }
@@ -44,6 +46,17 @@ func (f *File) Length() int64 {
 
 func (f *File) PostScriptLength() int64 {
 	return f.postscriptLength
+}
+
+func (f *File) GetMetadata() *Metadata {
+	if !f.metadataLoaded {
+		if err := f.loadMetadata(nil); err != nil {
+			// TODO: figure out what do with the error
+			fmt.Println(err)
+			return nil
+		}
+	}
+	return &(f.metadata)
 }
 
 var writerVersions = map[uint32]string{
@@ -175,6 +188,48 @@ func (f *File) GetStripeFooter(i *StripeInformation) (*StripeFooter, error) {
 	}
 
 	return &footer, nil
+}
+
+// load metadata
+func (f *File) loadMetadata(tail *[]byte) error {
+	if tail == nil {
+		t := make([]byte, 0)
+		tail = &t
+	}
+	footerLength := int64(f.PostScript.GetFooterLength())
+	metadataLength := int64(f.PostScript.GetMetadataLength())
+	tailLength := 1 + f.postscriptLength + footerLength + metadataLength
+	readLength := int64(len(*tail))
+
+	var metadataReader io.Reader
+	if tailLength > readLength {
+		// did not catch entire tail with first read, get more
+		// TODO: revisit reread vs read diff + concat original read
+		metadataReader = io.NewSectionReader(f.r, f.length-tailLength, metadataLength)
+	} else {
+		metdataOffset := readLength - tailLength
+		metadataReader = bytes.NewReader((*tail)[metdataOffset : metdataOffset+metadataLength])
+	}
+
+	if *(f.PostScript.Compression) != CompressionKind_NONE {
+		var err error
+		metadataReader, err = f.compressedReader(metadataReader, metadataLength)
+		if err != nil {
+			return err
+		}
+	}
+
+	metadataBuf, err := ioutil.ReadAll(metadataReader)
+	if err != nil {
+		return fmt.Errorf("while consuming metadata: %s", err)
+	}
+
+	if err := proto.Unmarshal(metadataBuf, &(f.metadata)); err != nil {
+		return fmt.Errorf("while unmarshaling metadata: %s", err)
+	}
+
+	f.metadataLoaded = true
+	return nil
 }
 
 func (f *File) compressedReader(r io.Reader, l int64) (io.Reader, error) {
